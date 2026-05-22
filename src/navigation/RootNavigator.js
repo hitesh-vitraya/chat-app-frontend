@@ -8,7 +8,7 @@ export default function RootNavigator() {
 
   return (
     <NavigationContainer>
-      {isAuthenticated ? <AppNavigator /> : <AuthNavigator />}
+      {isAuthenticated ? <AppNavigator key="app" /> : <AuthNavigator key="auth" />}
     </NavigationContainer>
   );
 }

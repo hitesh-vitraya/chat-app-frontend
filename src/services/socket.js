@@ -4,6 +4,10 @@ import { SOCKET_URL } from '../constants/config';
 let socket;
 
 export const initializeSocket = (token) => {
+  if (socket) {
+    socket.disconnect();
+  }
+
   socket = io(SOCKET_URL, {
     autoConnect: false,
     auth: token ? { token } : undefined,
@@ -13,9 +17,11 @@ export const initializeSocket = (token) => {
   return socket;
 };
 
-export const getSocket = () => {
+export const getSocket = (token) => {
   if (!socket) {
-    socket = initializeSocket();
+    socket = initializeSocket(token);
+  } else if (token) {
+    socket.auth = { token };
   }
 
   return socket;
