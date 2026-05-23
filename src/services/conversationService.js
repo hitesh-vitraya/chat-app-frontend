@@ -1,13 +1,5 @@
 import api from './api';
 
-const CONVERSATION_ENDPOINTS = [
-  process.env.EXPO_PUBLIC_CONVERSATIONS_PATH,
-  '/conversations',
-  '/chats',
-  '/chat',
-  '/messages/conversations'
-].filter(Boolean);
-
 const getPayload = (data) => data?.data || data;
 
 const normalizeConversations = (data) => {
@@ -33,24 +25,13 @@ const normalizeConversations = (data) => {
 };
 
 export const getConversations = async () => {
-  let routeError;
+  const response = await api.get('/chat/conversations');
+  return normalizeConversations(response.data);
+};
 
-  for (const endpoint of CONVERSATION_ENDPOINTS) {
-    try {
-      const response = await api.get(endpoint);
-      return normalizeConversations(response.data);
-    } catch (error) {
-      if (error.response?.status !== 404) {
-        throw error;
-      }
+export const startConversation = async (receiverId) => {
+  const response = await api.post('/chat/start', { receiverId });
+  const payload = getPayload(response.data);
 
-      routeError = error;
-    }
-  }
-
-  if (routeError) {
-    return [];
-  }
-
-  return [];
+  return payload?.conversation || payload?.chat || payload;
 };

@@ -5,7 +5,7 @@ const socketEvents = {
   message: ['receive_message', 'message', 'newMessage', 'message:new'],
   typing: ['typing', 'userTyping', 'typing:start'],
   stopTyping: ['stop_typing', 'stopTyping', 'typing:stop'],
-  seen: ['seen_status', 'messageSeen', 'message:seen'],
+  seen: ['seen_status', 'messageSeen', 'message:seen', 'messages_seen', 'messages:read'],
   online: ['online', 'user_online', 'presence:online'],
   offline: ['offline', 'user_offline', 'presence:offline']
 };
@@ -13,7 +13,6 @@ const socketEvents = {
 const emitEvents = {
   joinConversation: ['join_conversation', 'joinConversation', 'conversation:join'],
   leaveConversation: ['leave_conversation', 'leaveConversation', 'conversation:leave'],
-  sendMessage: ['send_message', 'sendMessage', 'message:send'],
   typing: ['typing', 'typing:start'],
   stopTyping: ['stop_typing', 'stopTyping', 'typing:stop'],
   seen: ['seen_status', 'message_seen', 'message:seen']
@@ -58,12 +57,21 @@ export const connectSocket = (token) => {
 export const getSocket = (token) => getOrCreateSocket(token);
 
 export const disconnectSocket = () => {
+  console.log('[socket] disconnectSocket called. hasSocket:', Boolean(socket));
   authToken = null;
 
   if (socket) {
-    socket.removeAllListeners();
-    socket.disconnect();
+    const activeSocket = socket;
     socket = null;
+
+    try {
+      activeSocket.removeAllListeners();
+      activeSocket.disconnect();
+      console.log('[socket] disconnected');
+    } catch {
+      // Logout should never be blocked by socket cleanup.
+      console.log('[socket] disconnect failed');
+    }
   }
 };
 
@@ -112,9 +120,23 @@ export const leaveConversation = (conversationId) => {
   emitMany(emitEvents.leaveConversation, { conversationId });
 };
 
-export const emitSendMessage = ({ conversationId, message }) => {
-  emitMany(emitEvents.sendMessage, { conversationId, message });
-};
+export const emitSendMessage = ({ receiverId, text }) => new Promise((resolve, reject) => {
+  const activeSocket = getOrCreateSocket();
+  const timeoutId = setTimeout(() => {
+    reject(new Error('Timed out while sending message.'));
+  }, 10000);
+
+  activeSocket.emit('send_message', { receiverId, text }, (response = {}) => {
+    clearTimeout(timeoutId);
+
+    if (response.error) {
+      reject(new Error(response.error));
+      return;
+    }
+
+    resolve(response);
+  });
+});
 
 export const emitTyping = (conversationId) => {
   emitMany(emitEvents.typing, { conversationId });

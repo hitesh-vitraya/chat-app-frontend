@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import LoadingScreen from '../screens/LoadingScreen';
 import { loginRequest, signupRequest } from '../services/authService';
+import { subscribeToLogout } from '../services/logoutBus';
 import { connectSocket, disconnectSocket } from '../services/socket';
 import { storage, storageKeys } from '../utils/storage';
 
@@ -10,15 +11,18 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [sessionVersion, setSessionVersion] = useState(0);
 
   useEffect(() => {
     const restoreSession = async () => {
       try {
+        console.log('[auth] restoring session');
         const [storedToken, storedUser] = await Promise.all([
           storage.get(storageKeys.authToken),
           storage.get(storageKeys.user)
         ]);
 
+        console.log('[auth] restored token:', Boolean(storedToken));
         if (storedToken) {
           setToken(storedToken);
           setUser(storedUser);
@@ -32,12 +36,25 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   useEffect(() => {
+    console.log('[auth] token changed:', Boolean(token));
     if (token) {
       connectSocket(token);
+    } else {
+      disconnectSocket();
     }
 
     return undefined;
   }, [token]);
+
+  const clearLocalSession = useCallback(() => {
+    console.log('[auth] clearLocalSession');
+    setToken(null);
+    setUser(null);
+    setIsLoading(false);
+    setSessionVersion((version) => version + 1);
+  }, []);
+
+  useEffect(() => subscribeToLogout(clearLocalSession), [clearLocalSession]);
 
   const storeSession = useCallback(async ({ token: authToken, user: authUser }) => {
     await storage.set(storageKeys.authToken, authToken);
@@ -53,8 +70,10 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const login = useCallback(async (credentials) => {
+    console.log('[auth] login requested');
     const session = await loginRequest(credentials);
     await storeSession(session);
+    console.log('[auth] login completed');
     return session;
   }, [storeSession]);
 
@@ -64,27 +83,49 @@ export const AuthProvider = ({ children }) => {
     return session;
   }, [storeSession]);
 
-  const logout = useCallback(async () => {
-    disconnectSocket();
+  const logout = useCallback(() => {
+    console.log('[auth] logout called');
+    clearLocalSession();
+
+    Promise.resolve()
+      .then(() => {
+        console.log('[auth] logout cleanup start');
+        disconnectSocket();
+        return Promise.all([
+          storage.remove(storageKeys.authToken),
+          storage.remove(storageKeys.user)
+        ]);
+      })
+      .then(() => {
+        console.log('[auth] logout cleanup completed');
+      })
+      .catch((error) => {
+        console.log('[auth] logout cleanup failed, clearing storage', error?.message);
+        return storage.clear();
+      });
+  }, [clearLocalSession]);
+
+  const clearSession = useCallback(async () => {
+    console.log('[auth] clearSession called');
+    clearLocalSession();
 
     await Promise.all([
-      storage.remove(storageKeys.authToken),
-      storage.remove(storageKeys.user)
+        storage.remove(storageKeys.authToken),
+        storage.remove(storageKeys.user)
     ]);
-
-    setToken(null);
-    setUser(null);
-  }, []);
+  }, [clearLocalSession]);
 
   const value = useMemo(() => ({
     user,
     token,
     isLoading,
     isAuthenticated: Boolean(token),
+    sessionVersion,
     login,
     signup,
-    logout
-  }), [isLoading, login, logout, signup, token, user]);
+    logout,
+    clearSession
+  }), [clearSession, isLoading, login, logout, sessionVersion, signup, token, user]);
 
   if (isLoading) {
     return <LoadingScreen />;

@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import theme from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
-import { getMessages, sendMessage } from '../services/messageService';
+import { getMessages } from '../services/messageService';
 import {
   emitSendMessage,
   emitSeenStatus,
@@ -21,13 +21,14 @@ import {
   joinConversation,
   leaveConversation,
   onSocketReconnect,
+  subscribeToPresence,
   subscribeToMessages,
   subscribeToSeenStatus,
   subscribeToTyping
 } from '../services/socket';
 import { getApiErrorMessage } from '../utils/errors';
 
-const PAGE_SIZE = 30;
+const PAGE_SIZE = 20;
 
 const getMessageId = (message) => (
   message.id
@@ -55,6 +56,127 @@ const getSenderId = (message) => (
 );
 
 const getUserId = (user) => user?.id || user?._id || user?.userId;
+
+const getParticipant = (conversation, currentUserId) => {
+  const directParticipant = (
+    conversation?.participant
+    || conversation?.receiver
+    || conversation?.recipient
+    || conversation?.otherUser
+  );
+
+  if (directParticipant) {
+    return directParticipant;
+  }
+
+  const users = conversation?.members || conversation?.participants || conversation?.users || [];
+
+  if (Array.isArray(users) && users.length) {
+    return users.find((member) => {
+      const memberId = getUserId(member);
+      return currentUserId && memberId && String(memberId) !== String(currentUserId);
+    }) || users[0];
+  }
+
+  return conversation?.user || {};
+};
+
+const getReceiverId = (routeParams, currentUserId) => {
+  const conversation = routeParams?.conversation || {};
+  const participant = getParticipant(conversation, currentUserId);
+
+  return (
+    routeParams?.receiverId
+    || participant.id
+    || participant._id
+    || participant.userId
+    || conversation.receiverId
+    || conversation.participantId
+    || conversation.userId
+  );
+};
+
+const getChatTitle = (routeParams, currentUserId) => {
+  if (routeParams?.title && routeParams.title !== 'Unknown user') {
+    return routeParams.title;
+  }
+
+  const participant = getParticipant(routeParams?.conversation || {}, currentUserId);
+
+  return participant.username || participant.name || participant.fullName || routeParams?.title || 'Chat';
+};
+
+const getLastSeenValue = (participant, conversation) => (
+  participant.lastSeen
+  || participant.lastSeenAt
+  || participant.lastActiveAt
+  || participant.updatedAt
+  || conversation.lastSeen
+  || conversation.lastSeenAt
+);
+
+const formatPresenceTime = (value) => {
+  if (!value) {
+    return '';
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+
+  if (isToday) {
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+
+  if (date.toDateString() === yesterday.toDateString()) {
+    return `yesterday at ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  }
+
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+};
+
+const getInitialPresence = (routeParams, currentUserId) => {
+  const conversation = routeParams?.conversation || {};
+  const participant = getParticipant(conversation, currentUserId);
+  const isOnline = Boolean(participant.isOnline || participant.online || conversation.isOnline);
+
+  return {
+    isOnline,
+    lastSeenAt: getLastSeenValue(participant, conversation)
+  };
+};
+
+const getPresenceUserId = (payload) => (
+  payload?.userId
+  || payload?.id
+  || payload?._id
+  || payload?.user?.id
+  || payload?.user?._id
+);
+
+const getPresenceLabel = ({ isOnline, lastSeenAt }) => {
+  if (isOnline) {
+    return 'Online';
+  }
+
+  const timestamp = formatPresenceTime(lastSeenAt);
+
+  return timestamp ? `Last seen ${timestamp}` : 'Offline';
+};
+
+const getSocketMessage = (response) => (
+  response?.message
+  || response?.data?.message
+  || response?.data
+  || response
+);
 
 const formatMessageTime = (value) => {
   if (!value) {
@@ -123,8 +245,6 @@ const belongsToConversation = (payload, conversationId) => {
   return !payloadConversationId || String(payloadConversationId) === String(conversationId);
 };
 
-const getOldestCursor = (messages) => messages[messages.length - 1]?.createdAt;
-
 const MessageBubble = memo(function MessageBubble({ item }) {
   return (
     <View style={[
@@ -164,28 +284,73 @@ const MessageBubble = memo(function MessageBubble({ item }) {
 
 export default function ChatScreen({ route, navigation }) {
   const { user } = useAuth();
-  const conversationId = route.params?.conversationId || route.params?.conversation?._id || route.params?.conversation?.id;
-  const title = route.params?.title || 'Chat';
   const currentUserId = useMemo(() => getUserId(user), [user]);
+  const conversationId = route.params?.conversationId || route.params?.conversation?._id || route.params?.conversation?.id;
+  const receiverId = getReceiverId(route.params, currentUserId);
+  const title = getChatTitle(route.params, currentUserId);
+  const [presence, setPresence] = useState(() => getInitialPresence(route.params, currentUserId));
   const listRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const messagesRef = useRef([]);
   const hasMoreRef = useRef(true);
   const isLoadingMoreRef = useRef(false);
-  const nextCursorRef = useRef(null);
+  const nextPageRef = useRef(1);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
-  const [nextCursor, setNextCursor] = useState(null);
+  const [nextPage, setNextPage] = useState(1);
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
 
   useLayoutEffect(() => {
-    navigation.setOptions({ title });
-  }, [navigation, title]);
+    navigation.setOptions({
+      headerTitle: () => (
+        <View style={styles.headerTitle}>
+          <Text numberOfLines={1} style={styles.headerName}>{title}</Text>
+          <Text
+            numberOfLines={1}
+            style={[
+              styles.headerPresence,
+              presence.isOnline && styles.headerPresenceOnline
+            ]}
+          >
+            {getPresenceLabel(presence)}
+          </Text>
+        </View>
+      )
+    });
+  }, [navigation, presence, title]);
+
+  useEffect(() => {
+    setPresence(getInitialPresence(route.params, currentUserId));
+  }, [currentUserId, route.params]);
+
+  useEffect(() => {
+    if (!receiverId) {
+      return undefined;
+    }
+
+    const updatePresence = (payload, isOnline) => {
+      const userId = getPresenceUserId(payload);
+
+      if (!userId || String(userId) !== String(receiverId)) {
+        return;
+      }
+
+      setPresence((current) => ({
+        isOnline,
+        lastSeenAt: isOnline ? current.lastSeenAt : (payload?.lastSeenAt || payload?.lastSeen || new Date().toISOString())
+      }));
+    };
+
+    return subscribeToPresence({
+      onOnline: (payload) => updatePresence(payload, true),
+      onOffline: (payload) => updatePresence(payload, false)
+    });
+  }, [receiverId]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -200,8 +365,8 @@ export default function ChatScreen({ route, navigation }) {
   }, [isLoadingMore]);
 
   useEffect(() => {
-    nextCursorRef.current = nextCursor;
-  }, [nextCursor]);
+    nextPageRef.current = nextPage;
+  }, [nextPage]);
 
   const loadMessages = useCallback(async ({ older = false } = {}) => {
     if (!conversationId || (older && (!hasMoreRef.current || isLoadingMoreRef.current))) {
@@ -219,14 +384,22 @@ export default function ChatScreen({ route, navigation }) {
     try {
       const response = await getMessages({
         conversationId,
-        cursor: older ? nextCursorRef.current || getOldestCursor(messagesRef.current) : undefined,
+        page: older ? nextPageRef.current : 1,
         limit: PAGE_SIZE
       });
       const normalized = response.messages.map((message) => normalizeMessage(message, currentUserId));
+      const latestIncomingMessage = normalized.find((message) => !message.isMine);
 
       setMessages((current) => older ? mergeMessages(current, normalized) : sortNewestFirst(normalized));
       setHasMore(response.hasMore && normalized.length > 0);
-      setNextCursor(response.nextCursor || getOldestCursor(normalized));
+      setNextPage(response.nextPage || (older ? nextPageRef.current + 1 : 2));
+
+      if (!older && latestIncomingMessage) {
+        emitSeenStatus({
+          conversationId,
+          messageId: latestIncomingMessage.id
+        });
+      }
     } catch (loadError) {
       setError(getApiErrorMessage(loadError, 'Unable to load messages.'));
     } finally {
@@ -346,7 +519,7 @@ export default function ChatScreen({ route, navigation }) {
   const handleSend = useCallback(async () => {
     const text = input.trim();
 
-    if (!text || !conversationId || isSending) {
+    if (!text || !conversationId || !receiverId || isSending) {
       return;
     }
 
@@ -360,6 +533,8 @@ export default function ChatScreen({ route, navigation }) {
       clientId,
       text,
       senderId: currentUserId,
+      fromMe: true,
+      isMine: true,
       createdAt: new Date().toISOString(),
       pending: true,
       status: 'sent'
@@ -369,7 +544,8 @@ export default function ChatScreen({ route, navigation }) {
     requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: true }));
 
     try {
-      const savedMessage = await sendMessage({ conversationId, text });
+      const response = await emitSendMessage({ receiverId, text });
+      const savedMessage = getSocketMessage(response);
       const normalizedSavedMessage = normalizeMessage(savedMessage || {
         ...optimisticMessage.raw,
         pending: false
@@ -377,13 +553,9 @@ export default function ChatScreen({ route, navigation }) {
 
       setMessages((current) => mergeMessages(
         current.filter((message) => message.id !== optimisticMessage.id),
-        [{ ...normalizedSavedMessage, pending: false }]
+        [{ ...normalizedSavedMessage, isMine: true, pending: false }]
       ));
 
-      emitSendMessage({
-        conversationId,
-        message: normalizedSavedMessage.raw || savedMessage
-      });
     } catch (sendError) {
       setError(getApiErrorMessage(sendError, 'Unable to send message.'));
       setMessages((current) => current.filter((message) => message.id !== optimisticMessage.id));
@@ -391,7 +563,7 @@ export default function ChatScreen({ route, navigation }) {
     } finally {
       setIsSending(false);
     }
-  }, [conversationId, currentUserId, emitTypingStatus, input, isSending]);
+  }, [conversationId, currentUserId, emitTypingStatus, input, isSending, receiverId]);
 
   const handleLoadMore = useCallback(() => {
     loadMessages({ older: true });
@@ -481,11 +653,11 @@ export default function ChatScreen({ route, navigation }) {
         />
         <Pressable
           accessibilityRole="button"
-          disabled={!input.trim() || isSending}
+          disabled={!input.trim() || !receiverId || isSending}
           onPress={handleSend}
           style={({ pressed }) => [
             styles.sendButton,
-            (!input.trim() || isSending) && styles.sendButtonDisabled,
+            (!input.trim() || !receiverId || isSending) && styles.sendButtonDisabled,
             pressed && styles.sendButtonPressed
           ]}
         >
@@ -500,6 +672,23 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: theme.colors.background
+  },
+  headerTitle: {
+    maxWidth: 220
+  },
+  headerName: {
+    color: theme.colors.text,
+    fontSize: theme.typography.body,
+    fontWeight: '700'
+  },
+  headerPresence: {
+    marginTop: 1,
+    color: theme.colors.mutedText,
+    fontSize: 11
+  },
+  headerPresenceOnline: {
+    color: theme.colors.success,
+    fontWeight: '700'
   },
   centered: {
     flex: 1,

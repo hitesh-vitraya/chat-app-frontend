@@ -1,28 +1,48 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
-  Image,
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
   View
 } from 'react-native';
+import UserAvatar from '../components/UserAvatar';
 import theme from '../constants/theme';
+import { useAuth } from '../context/AuthContext';
 import { getConversations } from '../services/conversationService';
-import { subscribeToPresence } from '../services/socket';
+import { subscribeToPresence, subscribeToSeenStatus } from '../services/socket';
 import { getApiErrorMessage } from '../utils/errors';
 
 const ROW_HEIGHT = 84;
 
-const getParticipant = (conversation) => (
-  conversation.participant
-  || conversation.user
-  || conversation.otherUser
-  || conversation.members?.[0]
-  || {}
-);
+const getUserId = (user) => user?.id || user?._id || user?.userId;
+
+const getParticipant = (conversation, currentUserId) => {
+  const directParticipant = (
+    conversation.participant
+    || conversation.receiver
+    || conversation.recipient
+    || conversation.otherUser
+  );
+
+  if (directParticipant) {
+    return directParticipant;
+  }
+
+  const users = conversation.members || conversation.participants || conversation.users || [];
+
+  if (Array.isArray(users) && users.length) {
+    return users.find((member) => {
+      const memberId = getUserId(member);
+      return currentUserId && memberId && String(memberId) !== String(currentUserId);
+    }) || users[0];
+  }
+
+  return conversation.user || {};
+};
 
 const getLastMessage = (conversation) => {
   const message = conversation.lastMessage || conversation.latestMessage || conversation.message;
@@ -73,8 +93,6 @@ const formatTimestamp = (value) => {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 };
 
-const getInitial = (name) => (name?.trim()?.charAt(0) || '?').toUpperCase();
-
 const getParticipantId = (participant, conversation) => (
   participant.id
   || participant._id
@@ -98,13 +116,23 @@ const getConversationId = (conversation, index) => (
   || `conversation-${index}`
 );
 
-const normalizeConversation = (conversation, index) => {
-  const participant = getParticipant(conversation);
+const getSeenConversationId = (payload) => (
+  payload?.conversationId
+  || payload?.chatId
+  || payload?.conversation?._id
+  || payload?.conversation?.id
+);
+
+const normalizeConversation = (conversation, index, currentUserId, readConversationIds) => {
+  const participant = getParticipant(conversation, currentUserId);
   const username = participant.username || participant.name || participant.fullName || conversation.username || 'Unknown user';
-  const unreadCount = Number(conversation.unreadCount || conversation.unread || conversation.unreadMessagesCount || 0);
+  const id = getConversationId(conversation, index);
+  const unreadCount = readConversationIds.has(String(id))
+    ? 0
+    : Number(conversation.unreadCount || conversation.unread || conversation.unreadMessagesCount || 0);
 
   return {
-    id: getConversationId(conversation, index),
+    id,
     participantId: getParticipantId(participant, conversation),
     raw: conversation,
     username,
@@ -127,14 +155,7 @@ const ChatListItem = memo(function ChatListItem({ item, onPress }) {
       ]}
     >
       <View style={styles.avatarWrap}>
-        {item.avatarUrl ? (
-          <Image source={{ uri: item.avatarUrl }} style={styles.avatar} />
-        ) : (
-          <View style={[styles.avatar, styles.avatarFallback]}>
-            <Text style={styles.avatarInitial}>{getInitial(item.username)}</Text>
-          </View>
-        )}
-        {item.isOnline ? <View style={styles.onlineIndicator} /> : null}
+        <UserAvatar name={item.username} online={item.isOnline} size={56} uri={item.avatarUrl} />
       </View>
 
       <View style={styles.messageArea}>
@@ -164,14 +185,23 @@ const ChatListItem = memo(function ChatListItem({ item, onPress }) {
 });
 
 export default function ChatListScreen({ navigation }) {
+  const { user } = useAuth();
+  const currentUserId = useMemo(() => getUserId(user), [user]);
+  const hasLoadedRef = useRef(false);
   const [conversations, setConversations] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [readConversationIds, setReadConversationIds] = useState(() => new Set());
 
   const normalizedConversations = useMemo(
-    () => conversations.map(normalizeConversation),
-    [conversations]
+    () => conversations.map((conversation, index) => normalizeConversation(
+      conversation,
+      index,
+      currentUserId,
+      readConversationIds
+    )),
+    [conversations, currentUserId, readConversationIds]
   );
 
   const loadConversations = useCallback(async ({ refreshing = false } = {}) => {
@@ -189,14 +219,17 @@ export default function ChatListScreen({ navigation }) {
     } catch (loadError) {
       setError(getApiErrorMessage(loadError, 'Unable to load conversations.'));
     } finally {
+      hasLoadedRef.current = true;
       setIsLoading(false);
       setIsRefreshing(false);
     }
   }, []);
 
-  useEffect(() => {
-    loadConversations();
-  }, [loadConversations]);
+  useFocusEffect(
+    useCallback(() => {
+      loadConversations({ refreshing: hasLoadedRef.current });
+    }, [loadConversations])
+  );
 
   useEffect(() => {
     const updatePresence = (payload, isOnline) => {
@@ -207,7 +240,7 @@ export default function ChatListScreen({ navigation }) {
       }
 
       setConversations((current) => current.map((conversation) => {
-        const participant = getParticipant(conversation);
+        const participant = getParticipant(conversation, currentUserId);
         const participantId = getParticipantId(participant, conversation);
 
         if (String(participantId) !== String(userId)) {
@@ -217,9 +250,11 @@ export default function ChatListScreen({ navigation }) {
         return {
           ...conversation,
           isOnline,
+          lastSeenAt: isOnline ? conversation.lastSeenAt : (payload?.lastSeenAt || payload?.lastSeen || new Date().toISOString()),
           participant: {
             ...participant,
-            isOnline
+            isOnline,
+            lastSeenAt: isOnline ? participant.lastSeenAt : (payload?.lastSeenAt || payload?.lastSeen || new Date().toISOString())
           }
         };
       }));
@@ -229,18 +264,43 @@ export default function ChatListScreen({ navigation }) {
       onOnline: (payload) => updatePresence(payload, true),
       onOffline: (payload) => updatePresence(payload, false)
     });
-  }, []);
+  }, [currentUserId]);
+
+  useEffect(() => subscribeToSeenStatus((payload) => {
+    const conversationId = getSeenConversationId(payload);
+
+    if (!conversationId) {
+      return;
+    }
+
+    setReadConversationIds((current) => {
+      const next = new Set(current);
+      next.add(String(conversationId));
+      return next;
+    });
+  }), []);
 
   const handleRefresh = useCallback(() => {
     loadConversations({ refreshing: true });
   }, [loadConversations]);
 
   const handlePressConversation = useCallback((conversation) => {
+    setReadConversationIds((current) => {
+      const next = new Set(current);
+      next.add(String(conversation.id));
+      return next;
+    });
+
     navigation.navigate('ChatScreen', {
       conversationId: conversation.id,
       conversation: conversation.raw,
+      receiverId: conversation.participantId,
       title: conversation.username
     });
+  }, [navigation]);
+
+  const handleNewChat = useCallback(() => {
+    navigation.navigate('NewChatScreen');
   }, [navigation]);
 
   const renderItem = useCallback(({ item }) => (
@@ -295,11 +355,32 @@ export default function ChatListScreen({ navigation }) {
         ListEmptyComponent={(
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>No chats yet</Text>
-            <Text style={styles.emptySubtitle}>New conversations will appear here.</Text>
+            <Text style={styles.emptySubtitle}>Search for someone and start your first conversation.</Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={handleNewChat}
+              style={({ pressed }) => [
+                styles.emptyButton,
+                pressed && styles.emptyButtonPressed
+              ]}
+            >
+              <Text style={styles.emptyButtonText}>Start a chat</Text>
+            </Pressable>
           </View>
         )}
         windowSize={7}
       />
+
+      <Pressable
+        accessibilityRole="button"
+        onPress={handleNewChat}
+        style={({ pressed }) => [
+          styles.fab,
+          pressed && styles.fabPressed
+        ]}
+      >
+        <Text style={styles.fabIcon}>+</Text>
+      </Pressable>
     </View>
   );
 }
@@ -356,33 +437,6 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     marginRight: theme.spacing.md
-  },
-  avatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: theme.colors.border
-  },
-  avatarFallback: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: theme.colors.primary
-  },
-  avatarInitial: {
-    color: theme.colors.surface,
-    fontSize: theme.typography.subtitle,
-    fontWeight: '700'
-  },
-  onlineIndicator: {
-    position: 'absolute',
-    right: 2,
-    bottom: 2,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 2,
-    borderColor: theme.colors.surface,
-    backgroundColor: theme.colors.success
   },
   messageArea: {
     flex: 1,
@@ -448,5 +502,45 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     color: theme.colors.mutedText,
     fontSize: theme.typography.body
+  },
+  emptyButton: {
+    marginTop: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
+    borderRadius: theme.radius.lg,
+    backgroundColor: theme.colors.primary
+  },
+  emptyButtonPressed: {
+    opacity: 0.78
+  },
+  emptyButtonText: {
+    color: theme.colors.surface,
+    fontSize: theme.typography.caption,
+    fontWeight: '700'
+  },
+  fab: {
+    position: 'absolute',
+    right: theme.spacing.lg,
+    bottom: theme.spacing.lg,
+    width: 56,
+    height: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 28,
+    backgroundColor: theme.colors.primary,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 6
+  },
+  fabPressed: {
+    opacity: 0.78
+  },
+  fabIcon: {
+    marginTop: -2,
+    color: theme.colors.surface,
+    fontSize: 32,
+    fontWeight: '500'
   }
 });

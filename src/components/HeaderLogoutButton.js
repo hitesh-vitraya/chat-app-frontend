@@ -1,51 +1,37 @@
-import { useState } from 'react';
-import { Pressable, StyleSheet, Text } from 'react-native';
+import { TouchableOpacity, StyleSheet, Text } from 'react-native';
 import theme from '../constants/theme';
-import { useAuth } from '../context/AuthContext';
+import { requestLogoutConfirmation } from '../services/logoutBus';
 
 export default function HeaderLogoutButton() {
-  const { logout } = useAuth();
-  const [isLoggingOut, setIsLoggingOut] = useState(false);
-
-  const handleLogout = async () => {
-    if (isLoggingOut) {
-      return;
-    }
-
-    setIsLoggingOut(true);
-
-    try {
-      await logout();
-    } finally {
-      setIsLoggingOut(false);
-    }
+  const handlePress = () => {
+    console.log('[logout] header button pressed');
+    requestLogoutConfirmation();
   };
 
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole="button"
-      disabled={isLoggingOut}
-      hitSlop={8}
-      onPress={handleLogout}
-      style={({ pressed }) => pressed && styles.pressed}
+      activeOpacity={0.55}
+      hitSlop={{ top: 12, right: 12, bottom: 12, left: 12 }}
+      onPressIn={handlePress}
+      style={styles.button}
     >
-      <Text style={[styles.text, isLoggingOut && styles.disabled]}>
-        {isLoggingOut ? 'Logging out...' : 'Logout'}
-      </Text>
-    </Pressable>
+      <Text style={styles.text}>Logout</Text>
+    </TouchableOpacity>
   );
 }
 
 const styles = StyleSheet.create({
-  pressed: {
-    opacity: 0.72
+  button: {
+    minWidth: 72,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: theme.spacing.sm
   },
   text: {
-    color: theme.colors.primary,
+    color: theme.colors.mutedText,
     fontSize: theme.typography.caption,
-    fontWeight: '700'
-  },
-  disabled: {
-    color: theme.colors.placeholder
+    fontWeight: '600'
   }
 });
