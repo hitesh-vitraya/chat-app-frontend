@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import theme from '../constants/theme';
 import { getConversations } from '../services/conversationService';
+import { subscribeToPresence } from '../services/socket';
 import { getApiErrorMessage } from '../utils/errors';
 
 const ROW_HEIGHT = 84;
@@ -74,6 +75,22 @@ const formatTimestamp = (value) => {
 
 const getInitial = (name) => (name?.trim()?.charAt(0) || '?').toUpperCase();
 
+const getParticipantId = (participant, conversation) => (
+  participant.id
+  || participant._id
+  || participant.userId
+  || conversation.userId
+  || conversation.participantId
+);
+
+const getPresenceUserId = (payload) => (
+  payload?.userId
+  || payload?.id
+  || payload?._id
+  || payload?.user?.id
+  || payload?.user?._id
+);
+
 const getConversationId = (conversation, index) => (
   conversation.id
   || conversation._id
@@ -88,6 +105,7 @@ const normalizeConversation = (conversation, index) => {
 
   return {
     id: getConversationId(conversation, index),
+    participantId: getParticipantId(participant, conversation),
     raw: conversation,
     username,
     avatarUrl: participant.avatar || participant.avatarUrl || participant.profileImage || conversation.avatarUrl,
@@ -179,6 +197,39 @@ export default function ChatListScreen({ navigation }) {
   useEffect(() => {
     loadConversations();
   }, [loadConversations]);
+
+  useEffect(() => {
+    const updatePresence = (payload, isOnline) => {
+      const userId = getPresenceUserId(payload);
+
+      if (!userId) {
+        return;
+      }
+
+      setConversations((current) => current.map((conversation) => {
+        const participant = getParticipant(conversation);
+        const participantId = getParticipantId(participant, conversation);
+
+        if (String(participantId) !== String(userId)) {
+          return conversation;
+        }
+
+        return {
+          ...conversation,
+          isOnline,
+          participant: {
+            ...participant,
+            isOnline
+          }
+        };
+      }));
+    };
+
+    return subscribeToPresence({
+      onOnline: (payload) => updatePresence(payload, true),
+      onOffline: (payload) => updatePresence(payload, false)
+    });
+  }, []);
 
   const handleRefresh = useCallback(() => {
     loadConversations({ refreshing: true });

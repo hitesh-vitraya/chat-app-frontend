@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import LoadingScreen from '../screens/LoadingScreen';
 import { loginRequest, signupRequest } from '../services/authService';
-import { disconnectSocket } from '../services/socket';
+import { connectSocket, disconnectSocket } from '../services/socket';
 import { storage, storageKeys } from '../utils/storage';
 
 const AuthContext = createContext(null);
@@ -30,6 +30,14 @@ export const AuthProvider = ({ children }) => {
 
     restoreSession();
   }, []);
+
+  useEffect(() => {
+    if (token) {
+      connectSocket(token);
+    }
+
+    return undefined;
+  }, [token]);
 
   const storeSession = useCallback(async ({ token: authToken, user: authUser }) => {
     await storage.set(storageKeys.authToken, authToken);

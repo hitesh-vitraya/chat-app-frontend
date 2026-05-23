@@ -13,7 +13,18 @@ import {
 import theme from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
 import { getMessages, sendMessage } from '../services/messageService';
-import { getSocket } from '../services/socket';
+import {
+  emitSendMessage,
+  emitSeenStatus,
+  emitStopTyping,
+  emitTyping,
+  joinConversation,
+  leaveConversation,
+  onSocketReconnect,
+  subscribeToMessages,
+  subscribeToSeenStatus,
+  subscribeToTyping
+} from '../services/socket';
 import { getApiErrorMessage } from '../utils/errors';
 
 const PAGE_SIZE = 30;
@@ -152,7 +163,7 @@ const MessageBubble = memo(function MessageBubble({ item }) {
 });
 
 export default function ChatScreen({ route, navigation }) {
-  const { token, user } = useAuth();
+  const { user } = useAuth();
   const conversationId = route.params?.conversationId || route.params?.conversation?._id || route.params?.conversation?.id;
   const title = route.params?.title || 'Chat';
   const currentUserId = useMemo(() => getUserId(user), [user]);
@@ -237,14 +248,7 @@ export default function ChatScreen({ route, navigation }) {
       return undefined;
     }
 
-    const socket = getSocket(token);
-
-    if (!socket.connected) {
-      socket.connect();
-    }
-
-    socket.emit('joinConversation', { conversationId });
-    socket.emit('conversation:join', { conversationId });
+    joinConversation(conversationId);
 
     const handleIncomingMessage = (payload) => {
       const message = payload?.message || payload;
@@ -253,7 +257,17 @@ export default function ChatScreen({ route, navigation }) {
         return;
       }
 
-      setMessages((current) => mergeMessages(current, [normalizeMessage(message, currentUserId)]));
+      const normalizedMessage = normalizeMessage(message, currentUserId);
+
+      setMessages((current) => mergeMessages(current, [normalizedMessage]));
+
+      if (!normalizedMessage.isMine) {
+        emitSeenStatus({
+          conversationId,
+          messageId: getMessageId(message)
+        });
+      }
+
       requestAnimationFrame(() => listRef.current?.scrollToOffset({ offset: 0, animated: true }));
     };
 
@@ -287,57 +301,47 @@ export default function ChatScreen({ route, navigation }) {
       )));
     };
 
-    socket.on('message', handleIncomingMessage);
-    socket.on('newMessage', handleIncomingMessage);
-    socket.on('message:new', handleIncomingMessage);
-    socket.on('typing', handleTyping);
-    socket.on('userTyping', handleTyping);
-    socket.on('stopTyping', handleStopTyping);
-    socket.on('typing:stop', handleStopTyping);
-    socket.on('messageSeen', handleSeen);
-    socket.on('message:seen', handleSeen);
+    const cleanupMessages = subscribeToMessages(handleIncomingMessage);
+    const cleanupTyping = subscribeToTyping({
+      onTyping: handleTyping,
+      onStopTyping: handleStopTyping
+    });
+    const cleanupSeen = subscribeToSeenStatus(handleSeen);
+    const cleanupReconnect = onSocketReconnect(() => joinConversation(conversationId));
 
     return () => {
-      socket.emit('leaveConversation', { conversationId });
-      socket.emit('conversation:leave', { conversationId });
-      socket.off('message', handleIncomingMessage);
-      socket.off('newMessage', handleIncomingMessage);
-      socket.off('message:new', handleIncomingMessage);
-      socket.off('typing', handleTyping);
-      socket.off('userTyping', handleTyping);
-      socket.off('stopTyping', handleStopTyping);
-      socket.off('typing:stop', handleStopTyping);
-      socket.off('messageSeen', handleSeen);
-      socket.off('message:seen', handleSeen);
+      leaveConversation(conversationId);
+      cleanupMessages();
+      cleanupTyping();
+      cleanupSeen();
+      cleanupReconnect();
     };
-  }, [conversationId, currentUserId, token]);
+  }, [conversationId, currentUserId]);
 
-  const emitTyping = useCallback((isCurrentlyTyping) => {
+  const emitTypingStatus = useCallback((isCurrentlyTyping) => {
     if (!conversationId) {
       return;
     }
 
-    const socket = getSocket(token);
-    const eventName = isCurrentlyTyping ? 'typing' : 'stopTyping';
-    const alternateEventName = isCurrentlyTyping ? 'typing:start' : 'typing:stop';
-    const payload = { conversationId };
-
-    socket.emit(eventName, payload);
-    socket.emit(alternateEventName, payload);
-  }, [conversationId, token]);
+    if (isCurrentlyTyping) {
+      emitTyping(conversationId);
+    } else {
+      emitStopTyping(conversationId);
+    }
+  }, [conversationId]);
 
   const handleChangeText = useCallback((value) => {
     setInput(value);
 
     if (!value.trim()) {
-      emitTyping(false);
+      emitTypingStatus(false);
       return;
     }
 
-    emitTyping(true);
+    emitTypingStatus(true);
     clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => emitTyping(false), 1200);
-  }, [emitTyping]);
+    typingTimeoutRef.current = setTimeout(() => emitTypingStatus(false), 1200);
+  }, [emitTypingStatus]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -347,7 +351,7 @@ export default function ChatScreen({ route, navigation }) {
     }
 
     clearTimeout(typingTimeoutRef.current);
-    emitTyping(false);
+    emitTypingStatus(false);
     setInput('');
     setIsSending(true);
 
@@ -376,9 +380,10 @@ export default function ChatScreen({ route, navigation }) {
         [{ ...normalizedSavedMessage, pending: false }]
       ));
 
-      const socket = getSocket(token);
-      socket.emit('sendMessage', { conversationId, message: normalizedSavedMessage.raw || savedMessage });
-      socket.emit('message:send', { conversationId, message: normalizedSavedMessage.raw || savedMessage });
+      emitSendMessage({
+        conversationId,
+        message: normalizedSavedMessage.raw || savedMessage
+      });
     } catch (sendError) {
       setError(getApiErrorMessage(sendError, 'Unable to send message.'));
       setMessages((current) => current.filter((message) => message.id !== optimisticMessage.id));
@@ -386,7 +391,7 @@ export default function ChatScreen({ route, navigation }) {
     } finally {
       setIsSending(false);
     }
-  }, [conversationId, currentUserId, emitTyping, input, isSending, token]);
+  }, [conversationId, currentUserId, emitTypingStatus, input, isSending]);
 
   const handleLoadMore = useCallback(() => {
     loadMessages({ older: true });
