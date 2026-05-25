@@ -1,7 +1,9 @@
 import { Image, StyleSheet, Text, View } from 'react-native';
 import theme from '../constants/theme';
 
-const getInitial = (name) => (name?.trim()?.charAt(0) || '?').toUpperCase();
+const getInitial = (name) => (
+  (typeof name === 'string' ? name.trim().charAt(0) : '') || '?'
+).toUpperCase();
 
 export default function UserAvatar({ name, uri, online, size = 48 }) {
   const avatarStyle = {

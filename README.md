@@ -179,7 +179,9 @@ The socket service is responsible for:
 4. `socket.js` creates or reuses a Socket.IO client with:
 
 ```js
-auth: { token }
+auth: {
+  token;
+}
 ```
 
 5. When the user logs out, auth state is cleared and the socket is disconnected.
@@ -189,12 +191,16 @@ auth: { token }
 Messages are sent through Socket.IO, not REST:
 
 ```js
-socket.emit('send_message', {
-  receiverId: '665fabc1234567890abc1234',
-  text: 'Hello'
-}, (response) => {
-  console.log(response);
-});
+socket.emit(
+  "send_message",
+  {
+    receiverId: "665fabc1234567890abc1234",
+    text: "Hello",
+  },
+  (response) => {
+    console.log(response);
+  },
+);
 ```
 
 In the UI, `ChatScreen` creates an optimistic message immediately, then replaces it with the acknowledged socket response when available.

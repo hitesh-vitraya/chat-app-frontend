@@ -17,10 +17,16 @@
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#F8FAFC"
-      }
+      },
+      "package": "com.hiteshrevvmind.chatappfrontend"
     },
     "plugins": [
       "expo-asset"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "2952dfad-649e-4618-a6e9-e118c756c277"
+      }
+    }
   }
 }

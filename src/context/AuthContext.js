@@ -37,10 +37,14 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     console.log('[auth] token changed:', Boolean(token));
-    if (token) {
-      connectSocket(token);
-    } else {
-      disconnectSocket();
+    try {
+      if (token) {
+        connectSocket(token);
+      } else {
+        disconnectSocket();
+      }
+    } catch (socketError) {
+      console.error('[socket] unable to update authentication connection', socketError);
     }
 
     return undefined;

@@ -1,0 +1,25 @@
+{
+  "cli": {
+    "version": ">= 12.0.0"
+  },
+  "build": {
+    "preview": {
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://chat-app-backend-production-c9ff.up.railway.app/api",
+        "EXPO_PUBLIC_SOCKET_URL": "https://chat-app-backend-production-c9ff.up.railway.app"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://chat-app-backend-production-c9ff.up.railway.app/api",
+        "EXPO_PUBLIC_SOCKET_URL": "https://chat-app-backend-production-c9ff.up.railway.app"
+      },
+      "android": {
+        "buildType": "app-bundle"
+      }
+    }
+  }
+}

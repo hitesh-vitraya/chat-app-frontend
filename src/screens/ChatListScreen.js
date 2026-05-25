@@ -13,14 +13,14 @@ import UserAvatar from '../components/UserAvatar';
 import theme from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
 import { getConversations } from '../services/conversationService';
-import { subscribeToPresence, subscribeToSeenStatus } from '../services/socket';
+import { subscribeToMessages, subscribeToPresence, subscribeToSeenStatus } from '../services/socket';
 import { getApiErrorMessage } from '../utils/errors';
 
 const ROW_HEIGHT = 84;
 
 const getUserId = (user) => user?.id || user?._id || user?.userId;
 
-const getParticipant = (conversation, currentUserId) => {
+const getParticipant = (conversation = {}, currentUserId) => {
   const directParticipant = (
     conversation.participant
     || conversation.receiver
@@ -44,17 +44,17 @@ const getParticipant = (conversation, currentUserId) => {
   return conversation.user || {};
 };
 
-const getLastMessage = (conversation) => {
+const getLastMessage = (conversation = {}) => {
   const message = conversation.lastMessage || conversation.latestMessage || conversation.message;
 
   if (!message) {
     return 'No messages yet';
   }
 
-  return message.text || message.content || message.body || String(message);
+  return message.text || message.content || message.body || (typeof message === 'string' ? message : 'No messages yet');
 };
 
-const getTimestampValue = (conversation) => {
+const getTimestampValue = (conversation = {}) => {
   const message = conversation.lastMessage || conversation.latestMessage || {};
 
   return (
@@ -93,7 +93,7 @@ const formatTimestamp = (value) => {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 };
 
-const getParticipantId = (participant, conversation) => (
+const getParticipantId = (participant = {}, conversation = {}) => (
   participant.id
   || participant._id
   || participant.userId
@@ -109,7 +109,7 @@ const getPresenceUserId = (payload) => (
   || payload?.user?._id
 );
 
-const getConversationId = (conversation, index) => (
+const getConversationId = (conversation = {}, index) => (
   conversation.id
   || conversation._id
   || conversation.conversationId
@@ -123,13 +123,42 @@ const getSeenConversationId = (payload) => (
   || payload?.conversation?.id
 );
 
-const normalizeConversation = (conversation, index, currentUserId, readConversationIds) => {
+const getMessageConversationId = (message) => (
+  message?.conversationId
+  || message?.chatId
+  || message?.conversation?._id
+  || message?.conversation?.id
+);
+
+const getMessageSenderId = (message) => (
+  message?.senderId
+  || message?.userId
+  || message?.sender?._id
+  || message?.sender?.id
+);
+
+const getUnreadCount = (conversation = {}) => {
+  const unreadValue = (
+    conversation.unreadCount
+    ?? conversation.unreadMessageCount
+    ?? conversation.unreadMessagesCount
+    ?? conversation.unread
+    ?? conversation.unread_count
+    ?? conversation.unread_message_count
+    ?? conversation.unreadMessages
+    ?? 0
+  );
+
+  return Array.isArray(unreadValue) ? unreadValue.length : Number(unreadValue);
+};
+
+const normalizeConversation = (conversation = {}, index, currentUserId, readConversationIds) => {
   const participant = getParticipant(conversation, currentUserId);
   const username = participant.username || participant.name || participant.fullName || conversation.username || 'Unknown user';
   const id = getConversationId(conversation, index);
   const unreadCount = readConversationIds.has(String(id))
     ? 0
-    : Number(conversation.unreadCount || conversation.unread || conversation.unreadMessagesCount || 0);
+    : getUnreadCount(conversation);
 
   return {
     id,
@@ -188,6 +217,7 @@ export default function ChatListScreen({ navigation }) {
   const { user } = useAuth();
   const currentUserId = useMemo(() => getUserId(user), [user]);
   const hasLoadedRef = useRef(false);
+  const conversationsRef = useRef([]);
   const [conversations, setConversations] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -195,7 +225,7 @@ export default function ChatListScreen({ navigation }) {
   const [readConversationIds, setReadConversationIds] = useState(() => new Set());
 
   const normalizedConversations = useMemo(
-    () => conversations.map((conversation, index) => normalizeConversation(
+    () => conversations.filter(Boolean).map((conversation, index) => normalizeConversation(
       conversation,
       index,
       currentUserId,
@@ -203,6 +233,10 @@ export default function ChatListScreen({ navigation }) {
     )),
     [conversations, currentUserId, readConversationIds]
   );
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   const loadConversations = useCallback(async ({ refreshing = false } = {}) => {
     if (refreshing) {
@@ -215,7 +249,7 @@ export default function ChatListScreen({ navigation }) {
 
     try {
       const nextConversations = await getConversations();
-      setConversations(nextConversations);
+      setConversations(Array.isArray(nextConversations) ? nextConversations.filter(Boolean) : []);
     } catch (loadError) {
       setError(getApiErrorMessage(loadError, 'Unable to load conversations.'));
     } finally {
@@ -279,6 +313,54 @@ export default function ChatListScreen({ navigation }) {
       return next;
     });
   }), []);
+
+  useEffect(() => subscribeToMessages((payload) => {
+    const message = payload?.message || payload;
+    const messageConversationId = getMessageConversationId(message);
+    const senderId = getMessageSenderId(message);
+
+    if (!message || (senderId && currentUserId && String(senderId) === String(currentUserId))) {
+      return;
+    }
+
+    const matchingConversation = conversationsRef.current.find((conversation, index) => {
+        const conversationId = getConversationId(conversation, index);
+        const participantId = getParticipantId(getParticipant(conversation, currentUserId), conversation);
+
+        return (
+          (messageConversationId && String(conversationId) === String(messageConversationId))
+          || (senderId && String(participantId) === String(senderId))
+        );
+    });
+
+    if (!matchingConversation) {
+      loadConversations({ refreshing: true });
+      return;
+    }
+
+    const matchingId = getConversationId(
+      matchingConversation,
+      conversationsRef.current.indexOf(matchingConversation)
+    );
+
+    setReadConversationIds((current) => {
+      const next = new Set(current);
+      next.delete(String(matchingId));
+      return next;
+    });
+
+    setConversations((current) => [
+      {
+        ...matchingConversation,
+        lastMessage: message,
+        updatedAt: message.createdAt || message.updatedAt || new Date().toISOString(),
+        unreadCount: getUnreadCount(matchingConversation) + 1
+      },
+      ...current.filter((conversation, index) => (
+        String(getConversationId(conversation, index)) !== String(matchingId)
+      ))
+    ]);
+  }), [currentUserId, loadConversations]);
 
   const handleRefresh = useCallback(() => {
     loadConversations({ refreshing: true });

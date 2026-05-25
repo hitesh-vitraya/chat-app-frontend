@@ -245,6 +245,37 @@ const belongsToConversation = (payload, conversationId) => {
   return !payloadConversationId || String(payloadConversationId) === String(conversationId);
 };
 
+const belongsToTypingContext = (payload, conversationId, receiverId, currentUserId) => {
+  const payloadConversationId = (
+    payload?.conversationId
+    || payload?.chatId
+    || payload?.conversation?._id
+    || payload?.conversation?.id
+  );
+
+  if (payloadConversationId) {
+    return String(payloadConversationId) === String(conversationId);
+  }
+
+  const typingUserId = payload?.userId || payload?.senderId || payload?.from;
+  const payloadReceiverId = payload?.receiverId || payload?.to;
+
+  if (typingUserId && currentUserId && String(typingUserId) === String(currentUserId)) {
+    return false;
+  }
+
+  if (typingUserId && receiverId) {
+    return String(typingUserId) === String(receiverId);
+  }
+
+  if (payloadReceiverId && currentUserId) {
+    return String(payloadReceiverId) === String(currentUserId);
+  }
+
+  // The backend sends user_typing only to the intended recipient.
+  return true;
+};
+
 const MessageBubble = memo(function MessageBubble({ item }) {
   return (
     <View style={[
@@ -291,6 +322,7 @@ export default function ChatScreen({ route, navigation }) {
   const [presence, setPresence] = useState(() => getInitialPresence(route.params, currentUserId));
   const listRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const remoteTypingTimeoutRef = useRef(null);
   const messagesRef = useRef([]);
   const hasMoreRef = useRef(true);
   const isLoadingMoreRef = useRef(false);
@@ -414,6 +446,7 @@ export default function ChatScreen({ route, navigation }) {
 
   useEffect(() => () => {
     clearTimeout(typingTimeoutRef.current);
+    clearTimeout(remoteTypingTimeoutRef.current);
   }, []);
 
   useEffect(() => {
@@ -445,21 +478,31 @@ export default function ChatScreen({ route, navigation }) {
     };
 
     const handleTyping = (payload) => {
-      if (!belongsToConversation(payload || {}, conversationId)) {
+      console.log('[typing] received user_typing', payload);
+
+      if (!belongsToTypingContext(payload || {}, conversationId, receiverId, currentUserId)) {
+        console.log('[typing] ignored user_typing for another chat');
         return;
       }
 
       const typingUserId = payload?.userId || payload?.senderId;
 
       if (currentUserId && typingUserId && String(typingUserId) === String(currentUserId)) {
+        console.log('[typing] ignored own typing event');
         return;
       }
 
+      console.log('[typing] showing typing indicator');
       setIsTyping(true);
+      clearTimeout(remoteTypingTimeoutRef.current);
+      remoteTypingTimeoutRef.current = setTimeout(() => setIsTyping(false), 2500);
     };
 
     const handleStopTyping = (payload) => {
-      if (belongsToConversation(payload || {}, conversationId)) {
+      console.log('[typing] received user_stop_typing', payload);
+
+      if (belongsToTypingContext(payload || {}, conversationId, receiverId, currentUserId)) {
+        clearTimeout(remoteTypingTimeoutRef.current);
         setIsTyping(false);
       }
     };
@@ -483,25 +526,32 @@ export default function ChatScreen({ route, navigation }) {
     const cleanupReconnect = onSocketReconnect(() => joinConversation(conversationId));
 
     return () => {
+      clearTimeout(remoteTypingTimeoutRef.current);
+      setIsTyping(false);
       leaveConversation(conversationId);
       cleanupMessages();
       cleanupTyping();
       cleanupSeen();
       cleanupReconnect();
     };
-  }, [conversationId, currentUserId]);
+  }, [conversationId, currentUserId, receiverId]);
 
   const emitTypingStatus = useCallback((isCurrentlyTyping) => {
-    if (!conversationId) {
+    if (!receiverId) {
+      console.log('[typing] cannot emit; receiverId is missing');
       return;
     }
 
+    const payload = { receiverId };
+
     if (isCurrentlyTyping) {
-      emitTyping(conversationId);
+      console.log('[typing] emit typing_start', payload);
+      emitTyping(payload);
     } else {
-      emitStopTyping(conversationId);
+      console.log('[typing] emit typing_stop', payload);
+      emitStopTyping(payload);
     }
-  }, [conversationId]);
+  }, [receiverId]);
 
   const handleChangeText = useCallback((value) => {
     setInput(value);
@@ -636,7 +686,9 @@ export default function ChatScreen({ route, navigation }) {
 
           {isTyping ? (
             <View style={styles.typingIndicator}>
-              <Text style={styles.typingText}>Typing...</Text>
+              <View style={styles.typingBubble}>
+                <Text style={styles.typingText}>{title} is typing...</Text>
+              </View>
             </View>
           ) : null}
         </>
@@ -789,8 +841,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: theme.spacing.lg,
-    transform: [{ scaleY: -1 }]
+    padding: theme.spacing.lg
   },
   emptyTitle: {
     color: theme.colors.text,
@@ -805,7 +856,17 @@ const styles = StyleSheet.create({
   },
   typingIndicator: {
     paddingHorizontal: theme.spacing.md,
-    paddingBottom: theme.spacing.xs
+    paddingBottom: theme.spacing.sm
+  },
+  typingBubble: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: theme.radius.lg,
+    borderBottomLeftRadius: theme.radius.sm,
+    backgroundColor: theme.colors.surface
   },
   typingText: {
     color: theme.colors.mutedText,

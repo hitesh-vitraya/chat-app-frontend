@@ -3,8 +3,8 @@ import { SOCKET_URL } from '../constants/config';
 
 const socketEvents = {
   message: ['receive_message', 'message', 'newMessage', 'message:new'],
-  typing: ['typing', 'userTyping', 'typing:start'],
-  stopTyping: ['stop_typing', 'stopTyping', 'typing:stop'],
+  typing: ['user_typing'],
+  stopTyping: ['user_stop_typing'],
   seen: ['seen_status', 'messageSeen', 'message:seen', 'messages_seen', 'messages:read'],
   online: ['online', 'user_online', 'presence:online'],
   offline: ['offline', 'user_offline', 'presence:offline']
@@ -13,8 +13,6 @@ const socketEvents = {
 const emitEvents = {
   joinConversation: ['join_conversation', 'joinConversation', 'conversation:join'],
   leaveConversation: ['leave_conversation', 'leaveConversation', 'conversation:leave'],
-  typing: ['typing', 'typing:start'],
-  stopTyping: ['stop_typing', 'stopTyping', 'typing:stop'],
   seen: ['seen_status', 'message_seen', 'message:seen']
 };
 
@@ -138,12 +136,14 @@ export const emitSendMessage = ({ receiverId, text }) => new Promise((resolve, r
   });
 });
 
-export const emitTyping = (conversationId) => {
-  emitMany(emitEvents.typing, { conversationId });
+export const emitTyping = ({ receiverId }) => {
+  console.log('[socket] emit typing_start', { receiverId });
+  getOrCreateSocket().emit('typing_start', { receiverId });
 };
 
-export const emitStopTyping = (conversationId) => {
-  emitMany(emitEvents.stopTyping, { conversationId });
+export const emitStopTyping = ({ receiverId }) => {
+  console.log('[socket] emit typing_stop', { receiverId });
+  getOrCreateSocket().emit('typing_stop', { receiverId });
 };
 
 export const emitSeenStatus = ({ conversationId, messageId }) => {
